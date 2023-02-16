@@ -1,7 +1,5 @@
 #![no_std]
 pub mod bus;
-mod endpoint;
-mod usb;
 
 pub use bus::UsbBus;
 
