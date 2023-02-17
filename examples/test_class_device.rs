@@ -20,7 +20,7 @@ fn main() -> ! {
         .RCU
         .configure()
         .ext_hf_clock(8.mhz())
-        .sysclk(108.mhz())
+        .sysclk(96.mhz())
         .freeze();
 
     let gpioa = dp.GPIOA.split(&mut rcu);
