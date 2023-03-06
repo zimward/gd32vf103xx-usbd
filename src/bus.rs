@@ -230,17 +230,24 @@ impl usb_device::bus::UsbBus for UsbBus {
             }
         );
         if index == 0 {
-            usbfs_device
-                .doep0len
-                .modify(|_, w| unsafe { w.pcnt().set_bit().stpcnt().bits(1) });
+            usbfs_device.doep0len.modify(|_, w| unsafe {
+                w.pcnt()
+                    .set_bit()
+                    .stpcnt()
+                    .bits(1)
+                    .tlen()
+                    .bits(self.endpoints.get_cntl_max_tlen())
+            });
         }
+        let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
+        let max_rx_bytes = usbfs_global.grflen.read().rxfd().bits() as u32 * 4;
         rep_register!(
             index,
             usbfs_device,
             doep1len,
             doep2len,
             doep3len,
-            |_, w| unsafe { w.pcnt().bits(1).stpcnt_rxdpid().bits(1) }
+            |_, w| unsafe { w.pcnt().bits(1).tlen().bits(max_rx_bytes) }
         );
         rep_register!(
             index,
@@ -249,7 +256,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             doep1ctl,
             doep2ctl,
             doep3ctl,
-            |_, w| w.cnak().set_bit()
+            |_, w| w.epen().set_bit().cnak().set_bit()
         );
     }
 
@@ -294,9 +301,14 @@ impl usb_device::bus::UsbBus for UsbBus {
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
         let index = ep_addr.index();
         if index == 0 {
-            usbfs_device
-                .doep0len
-                .modify(|_, w| unsafe { w.pcnt().set_bit().stpcnt().bits(3).tlen().bits(32) });
+            usbfs_device.doep0len.modify(|_, w| unsafe {
+                w.pcnt()
+                    .set_bit()
+                    .stpcnt()
+                    .bits(1)
+                    .tlen()
+                    .bits(self.endpoints.get_cntl_max_tlen())
+            });
         }
         rep_register!(
             index,
@@ -304,7 +316,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             doep1len,
             doep2len,
             doep3len,
-            |_, w| unsafe { w.pcnt().bits(1).stpcnt_rxdpid().bits(1) }
+            |_, w| unsafe { w.pcnt().bits(1) }
         );
         //clear NAK
         rep_register!(
@@ -314,7 +326,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             doep1ctl,
             doep2ctl,
             doep3ctl,
-            |_, w| { w.cnak().set_bit() }
+            |_, w| { w.epen().set_bit().cnak().set_bit() }
         );
         Ok(count)
     }
