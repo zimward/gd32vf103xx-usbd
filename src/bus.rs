@@ -6,7 +6,7 @@ use pac::usbfs_device::{diep0len, doep3ctl, doep3len};
 use usb_device::{
     bus::PollResult,
     class_prelude::UsbBusAllocator,
-    endpoint::{EndpointAddress, EndpointType},
+    endpoint::{EndpointAddress, EndpointDirection, EndpointType},
     UsbDirection, UsbError,
 };
 
@@ -170,10 +170,13 @@ impl usb_device::bus::UsbBus for UsbBus {
             .doepinten
             .modify(|_, w| w.tfen().set_bit().stpfen().set_bit());
     }
+
     fn suspend(&self) {}
+
     fn reset(&self) {
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
-        usbfs_device.dcfg.modify(|_, w| unsafe { w.dar().bits(0) });
+        //usbfs_device.dcfg.modify(|_, w| unsafe { w.dar().bits(0) });
+        /*
         //flush fifos
         let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
         //mark all fifos
@@ -186,12 +189,14 @@ impl usb_device::bus::UsbBus for UsbBus {
         //wait till flush is complete
         while usbfs_global.grstctl.read().txff().bit_is_set()
             || usbfs_global.grstctl.read().rxff().bit_is_set()
-        {}
+        {}*/
     }
+
     fn force_reset(&self) -> usb_device::Result<()> {
         Ok(())
         //todo!();
     }
+
     fn resume(&self) {}
     fn set_stalled(&self, ep_addr: EndpointAddress, stalled: bool) {
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
@@ -235,6 +240,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             );
         }
     }
+
     fn is_stalled(&self, ep_addr: EndpointAddress) -> bool {
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
         if let Ok(index) = EndpointNumber::try_from(ep_addr.index()) {
@@ -248,12 +254,14 @@ impl usb_device::bus::UsbBus for UsbBus {
         }
         false
     }
+
     fn set_device_address(&self, addr: u8) {
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
         usbfs_device
             .dcfg
             .modify(|_, w| unsafe { w.dar().bits(addr) });
     }
+
     fn read(&self, ep_addr: EndpointAddress, buf: &mut [u8]) -> usb_device::Result<usize> {
         if !ep_addr.is_out() {
             return Err(UsbError::InvalidEndpoint);
@@ -266,8 +274,10 @@ impl usb_device::bus::UsbBus for UsbBus {
         if count > buf.len() {
             return Err(UsbError::EndpointMemoryOverflow);
         }
+        //pop TF finished
+        let _ = usbfs_global.grstatp_device().read();
         let reads = (count + 3) / 4;
-        for i in (0..reads).rev() {
+        for i in 0..reads {
             let data = usbfs_global.grstatp_device().read().bits().to_ne_bytes();
             buf[i * 4..i * 4 + data.len()].copy_from_slice(&data);
         }
@@ -276,7 +286,7 @@ impl usb_device::bus::UsbBus for UsbBus {
         if index == EndpointNumber::EP0 {
             usbfs_device
                 .doep0len
-                .modify(|_, w| unsafe { w.pcnt().set_bit().stpcnt().bits(3) });
+                .modify(|_, w| unsafe { w.pcnt().set_bit().stpcnt().bits(1) });
         }
         rep_register!(
             index,
@@ -284,7 +294,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             doep1len,
             doep2len,
             doep3len,
-            |_, w| unsafe { w.pcnt().bits(1).stpcnt_rxdpid().bits(3) }
+            |_, w| unsafe { w.pcnt().bits(1).stpcnt_rxdpid().bits(1) }
         );
         //clear NAK
         rep_register!(
@@ -294,10 +304,11 @@ impl usb_device::bus::UsbBus for UsbBus {
             doep1ctl,
             doep2ctl,
             doep3ctl,
-            |_, w| { w.cnak().set_bit() }
+            |_, w| { w.snak().set_bit() }
         );
         Ok(count)
     }
+
     fn write(&self, ep_addr: EndpointAddress, buf: &[u8]) -> usb_device::Result<usize> {
         if !ep_addr.is_in() {
             return Err(UsbError::InvalidEndpoint);
@@ -338,6 +349,7 @@ impl usb_device::bus::UsbBus for UsbBus {
         }
         Ok(buf.len())
     }
+
     fn poll(&self) -> PollResult {
         let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
@@ -404,10 +416,10 @@ impl usb_device::bus::UsbBus for UsbBus {
             }
         } else if gintf.sp().bit_is_set() {
             usbfs_global.gintf.modify(|_, w| w.sp().clear_bit());
-            PollResult::Suspend
+            PollResult::None
         } else if gintf.rst().bit_is_set() {
             usbfs_global.gintf.modify(|_, w| w.rst().clear_bit());
-            usbfs_global.ginten.modify(|_, w| w.rstie().clear_bit()); //mask reset interrupt
+            //usbfs_global.ginten.modify(|_, w| w.rstie().clear_bit()); //mask reset interrupt
             PollResult::Reset
         } else if gintf.wkupif().bit_is_set() {
             usbfs_global.gintf.modify(|_, w| w.wkupif().clear_bit());
@@ -416,6 +428,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             PollResult::None
         }
     }
+
     fn alloc_ep(
         &mut self,
         ep_dir: UsbDirection,
