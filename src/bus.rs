@@ -146,18 +146,14 @@ impl usb_device::bus::UsbBus for UsbBus {
         });
         // power on phy etc
         usbfs_global.gccfg.modify(|_, w| {
-            if self.peripheral.ignore_vbus {
-                w.vbusig().set_bit();
-            }
             w.sofoen()
                 .set_bit() // enable SOF output pin
-                .vbusacen()
-                .set_bit() // VBUS A-device Comparer enable
-                .vbusbcen()
-                .set_bit() // VBUS B-device Comparer enable
                 .pwron()
                 .set_bit() // USB PHY power on
         });
+        if self.peripheral.ignore_vbus {
+            usbfs_global.gccfg.modify(|_, w| w.vbusig().set_bit());
+        }
         usbfs_global.grstctl.modify(|_, w| w.csrst().set_bit()); //soft reset
         while usbfs_global.grstctl.read().csrst().bit_is_set() {} //wait for soft reset
                                                                   //FIFO len
@@ -286,7 +282,7 @@ impl usb_device::bus::UsbBus for UsbBus {
         if index == EndpointNumber::EP0 {
             usbfs_device
                 .doep0len
-                .modify(|_, w| unsafe { w.pcnt().set_bit().stpcnt().bits(1) });
+                .modify(|_, w| unsafe { w.pcnt().set_bit().stpcnt().bits(3).tlen().bits(32) });
         }
         rep_register!(
             index,
@@ -304,7 +300,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             doep1ctl,
             doep2ctl,
             doep3ctl,
-            |_, w| { w.snak().set_bit() }
+            |_, w| { w.cnak().set_bit() }
         );
         Ok(count)
     }
@@ -459,7 +455,7 @@ impl usb_device::bus::UsbBus for UsbBus {
         }
         match ep_dir {
             UsbDirection::In => {
-                let words = (max_packet_size + 3) / 4;
+                let words = (max_packet_size + 31) / 32;
                 if index == EndpointNumber::EP0 {
                     if ep_type != EndpointType::Control {
                         return Err(UsbError::Unsupported);
