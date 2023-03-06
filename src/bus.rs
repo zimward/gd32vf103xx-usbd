@@ -467,16 +467,9 @@ impl usb_device::bus::UsbBus for UsbBus {
                             return Err(UsbError::Unsupported);
                         }
                     };
-                    device.diep0ctl.modify(|_, w| unsafe {
-                        w.epen()
-                            .set_bit()
-                            .mpl()
-                            .bits(mpl)
-                            .txfnum()
-                            .bits(0)
-                            .cnak()
-                            .set_bit()
-                    });
+                    device
+                        .diep0ctl
+                        .modify(|_, w| unsafe { w.mpl().bits(mpl).txfnum().bits(0) });
                     usbfs_global
                         .diep0tflen_mut()
                         .modify(|_, w| unsafe { w.iep0txfd().bits(words) });
@@ -489,16 +482,12 @@ impl usb_device::bus::UsbBus for UsbBus {
                 };
                 rep_register!(index, device, diep1ctl, diep2ctl, diep3ctl, |_, w| {
                     unsafe {
-                        w.epen()
-                            .set_bit() //endpoint enable
-                            .mpl()
+                        w.mpl()
                             .bits(max_packet_size)
                             .eptype()
                             .bits(type_bits)
                             .txfnum()
                             .bits(index as u8)
-                            .cnak()
-                            .set_bit()
                     }
                 });
                 rep_register!(
@@ -509,43 +498,12 @@ impl usb_device::bus::UsbBus for UsbBus {
                     diep3tflen,
                     |_, w| { unsafe { w.ieptxfd().bits(words) } }
                 );
-                Ok(EndpointAddress::from_parts(index as usize, ep_dir))
+                Ok(EndpointAddress::from_parts(index, ep_dir))
             }
             UsbDirection::Out => {
                 if index == 0 {
-                    device.doep0len.modify(|_, w| unsafe {
-                        w.tlen()
-                            .bits(max_packet_size as u8)
-                            .stpcnt()
-                            .bits(1) //allow 1 b2b setup packets
-                            .pcnt() //allow packets to be received
-                            .set_bit()
-                    })
+                    self.endpoints.set_cntl_max_tlen(max_packet_size as u8);
                 }
-                rep_register!(index, device, doep1len, doep2len, doep3len, |_, w| {
-                    unsafe {
-                        w.tlen()
-                            .bits(max_packet_size as u32)
-                            .pcnt()
-                            .bits(1)
-                            .stpcnt_rxdpid()
-                            .bits(1)
-                    }
-                });
-                rep_register!(
-                    index,
-                    device,
-                    doep0ctl,
-                    doep1ctl,
-                    doep2ctl,
-                    doep3ctl,
-                    |_, w| {
-                        w.epen()
-                            .set_bit() //endpoint enable
-                            .cnak()
-                            .set_bit()
-                    }
-                );
                 Ok(EndpointAddress::from_parts(index as usize, ep_dir))
             }
         }
