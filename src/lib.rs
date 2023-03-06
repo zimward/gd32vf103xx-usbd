@@ -1,5 +1,6 @@
 #![no_std]
 pub mod bus;
+pub mod stdout;
 
 pub use bus::UsbBus;
 
@@ -10,7 +11,6 @@ use gd32vf103xx_hal::gpio::{
 pub struct UsbPeripheral {
     pub pin_dm: PA11<Input<Floating>>,
     pub pin_dp: PA12<Input<Floating>>,
-    pub ignore_vbus: bool,
 }
 
 unsafe impl Sync for UsbPeripheral {}

@@ -2,6 +2,7 @@ use core::{ptr, usize};
 
 use crate::UsbPeripheral;
 use gd32vf103_pac as pac;
+use pac::usbfs_global;
 use usb_device::{
     bus::PollResult,
     class_prelude::UsbBusAllocator,
@@ -63,7 +64,7 @@ pub struct UsbBus {
 }
 
 impl UsbBus {
-    pub fn new(peripheral: UsbPeripheral) -> UsbBusAllocator<UsbBus> {
+    pub fn new(peripheral: UsbPeripheral, ignore_vbus: bool) -> UsbBusAllocator<UsbBus> {
         let bus = UsbBus {
             peripheral,
             endpoints: EpStorage::new(),
@@ -75,6 +76,30 @@ impl UsbBus {
         //reset
         rcu_regs.ahbrst.modify(|_, w| w.usbfsrst().set_bit());
         rcu_regs.ahbrst.modify(|_, w| w.usbfsrst().clear_bit());
+
+        let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
+        usbfs_global.gahbcs.modify(|_, w| w.txfth().set_bit());
+        //set device mode disable OTG
+        usbfs_global.gusbcs.modify(|_, w| {
+            w.fdm()
+                .set_bit()
+                .fhm()
+                .clear_bit()
+                .hnpcen()
+                .clear_bit()
+                .srpcen()
+                .clear_bit()
+        });
+        // power on phy
+        usbfs_global.gccfg.modify(|_, w| {
+            w.sofoen()
+                .set_bit() // enable SOF output pin
+                .pwron()
+                .set_bit() // USB PHY power on
+        });
+        if ignore_vbus {
+            usbfs_global.gccfg.modify(|_, w| w.vbusig().set_bit());
+        }
         UsbBusAllocator::new(bus)
     }
 
@@ -108,66 +133,35 @@ impl usb_device::bus::UsbBus for UsbBus {
         // Enable USB peripheral
         let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
-        //set device mode disable OTG
-        usbfs_global.gusbcs.modify(|_, w| {
-            w.fdm()
-                .set_bit()
-                .fhm()
-                .clear_bit()
-                .hnpcen()
-                .clear_bit()
-                .srpcen()
-                .clear_bit()
-        });
-        usbfs_global
-            .gahbcs
-            .modify(|_, w| w.txfth().set_bit().ginten().set_bit());
-        // set device speed
-        usbfs_device.dcfg.modify(|_, w| {
-            unsafe {
-                w.ds().bits(0b11) // full speed
-            }
-        });
+
         // enable interrupts
         usbfs_global.ginten.modify(|_, w| {
             w.rstie()
-                .set_bit() // usb reset
+                .set_bit()
                 .enumfie()
-                .set_bit() // enumeration done
-                .sofie()
-                .set_bit() // usb sof
+                .set_bit()
                 .spie()
-                .set_bit() // usb suspend
+                .set_bit()
                 .espie()
-                .set_bit() // early usb suspend
+                .set_bit()
                 .rxfneie()
                 .set_bit()
                 .rstie()
                 .set_bit()
                 .wkupie()
                 .set_bit()
-                .oepie()
-                .set_bit()
-                .iepie()
-                .set_bit()
         });
-        // power on phy etc
-        usbfs_global.gccfg.modify(|_, w| {
-            w.sofoen()
-                .set_bit() // enable SOF output pin
-                .pwron()
-                .set_bit() // USB PHY power on
+        usbfs_global.gahbcs.modify(|_, w| w.ginten().set_bit());
+
+        // set device speed
+        usbfs_device.dcfg.modify(|_, w| {
+            unsafe {
+                w.ds().bits(0b11) // full speed
+            }
         });
-        if self.peripheral.ignore_vbus {
-            usbfs_global.gccfg.modify(|_, w| w.vbusig().set_bit());
-        }
         usbfs_global.grstctl.modify(|_, w| w.csrst().set_bit()); //soft reset
         while usbfs_global.grstctl.read().csrst().bit_is_set() {} //wait for soft reset
-                                                                  //FIFO len
-        usbfs_global
-            .grflen
-            .modify(|_, w| unsafe { w.rxfd().bits(256) });
-        //EP interrupts
+                                                                  //EP interrupts
         usbfs_device.diepinten.modify(|_, w| w.tfen().set_bit());
         usbfs_device
             .doepinten
