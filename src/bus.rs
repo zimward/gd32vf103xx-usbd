@@ -2,7 +2,6 @@ use core::{ptr, usize};
 
 use crate::UsbPeripheral;
 use gd32vf103_pac as pac;
-use pac::usbfs_global;
 use usb_device::{
     bus::PollResult,
     class_prelude::UsbBusAllocator,
@@ -43,7 +42,7 @@ impl EpStorage {
             Ok(index)
         }
     }
-    fn is_allocated(&mut self, index: usize, dir: UsbDirection) -> bool {
+    fn is_allocated(&self, index: usize, dir: UsbDirection) -> bool {
         let pos = match dir {
             UsbDirection::In => 0,
             UsbDirection::Out => 4,
@@ -171,27 +170,43 @@ impl usb_device::bus::UsbBus for UsbBus {
     fn suspend(&self) {}
 
     fn reset(&self) {
-        let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
-        //usbfs_device.dcfg.modify(|_, w| unsafe { w.dar().bits(0) });
-        /*
-        //flush fifos
         let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
-        //mark all fifos
-        usbfs_global
-            .grstctl
-            .modify(|_, w| unsafe { w.txfnum().bits(0xFF) });
-        usbfs_global
-            .grstctl
-            .modify(|_, w| w.rxff().set_bit().txff().set_bit());
-        //wait till flush is complete
-        while usbfs_global.grstctl.read().txff().bit_is_set()
-            || usbfs_global.grstctl.read().rxff().bit_is_set()
-        {}*/
+        let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
+
+        //enable OUT endpoints to receive data from host
+        usbfs_device.doep0len.modify(|_, w| unsafe {
+            w.tlen()
+                .bits(self.endpoints.get_cntl_max_tlen())
+                .pcnt()
+                .set_bit()
+                .stpcnt()
+                .bits(1)
+        });
+        usbfs_device
+            .doep0ctl
+            .modify(|_, w| w.epen().set_bit().cnak().set_bit());
+        let max_rx_bytes = usbfs_global.grflen.read().rxfd().bits() as u32 * 4;
+        for i in 1..3 {
+            if self.endpoints.is_allocated(i, UsbDirection::Out) {
+                rep_register!(
+                    i,
+                    usbfs_device,
+                    doep1len,
+                    doep2len,
+                    doep3len,
+                    |_, w| unsafe { w.tlen().bits(max_rx_bytes).pcnt().bits(1) }
+                );
+                rep_register!(i, usbfs_device, doep1ctl, doep2ctl, doep3ctl, |_, w| w
+                    .epen()
+                    .set_bit()
+                    .cnak()
+                    .set_bit());
+            }
+        }
     }
 
     fn force_reset(&self) -> usb_device::Result<()> {
         Ok(())
-        //todo!();
     }
 
     fn resume(&self) {}
