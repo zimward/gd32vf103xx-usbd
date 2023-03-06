@@ -451,9 +451,9 @@ impl usb_device::bus::UsbBus for UsbBus {
             self.endpoints.advance(ep_dir)
         }?;
 
+        let words = (max_packet_size + 31) / 32;
         match ep_dir {
             UsbDirection::In => {
-                let words = (max_packet_size + 31) / 32;
                 if index == 0 {
                     if ep_type != EndpointType::Control {
                         return Err(UsbError::Unsupported);
@@ -504,6 +504,15 @@ impl usb_device::bus::UsbBus for UsbBus {
                 if index == 0 {
                     self.endpoints.set_cntl_max_tlen(max_packet_size as u8);
                 }
+                //adjust RX FIFO depth to be long enough for the larget endpoint
+                let rxfd = usbfs_global.grflen.read().rxfd().bits();
+                usbfs_global.grflen.modify(|_, w| unsafe {
+                    if words > rxfd {
+                        w.rxfd().bits(words)
+                    } else {
+                        w
+                    }
+                });
                 Ok(EndpointAddress::from_parts(index as usize, ep_dir))
             }
         }
