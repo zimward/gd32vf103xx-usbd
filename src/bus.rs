@@ -1,65 +1,72 @@
-use core::ptr;
+use core::{ptr, usize};
 
 use crate::UsbPeripheral;
 use gd32vf103_pac as pac;
-use pac::usbfs_device::{diep0len, doep3ctl, doep3len};
 use usb_device::{
     bus::PollResult,
     class_prelude::UsbBusAllocator,
-    endpoint::{EndpointAddress, EndpointDirection, EndpointType},
+    endpoint::{EndpointAddress, EndpointType},
     UsbDirection, UsbError,
 };
 
-#[derive(Clone, Copy, PartialEq)]
-enum EndpointNumber {
-    EP0,
-    EP1,
-    EP2,
-    EP3,
-    NoEPavail,
+struct EpStorage {
+    value: u32,
 }
 
-impl EndpointNumber {
-    fn advance(&mut self) -> Self {
-        let old = *self;
-        match self {
-            EndpointNumber::EP0 => *self = EndpointNumber::EP1,
-            EndpointNumber::EP1 => *self = EndpointNumber::EP2,
-            EndpointNumber::EP2 => *self = EndpointNumber::EP3,
-            EndpointNumber::EP3 => *self = EndpointNumber::NoEPavail, //no more endpoints available
-            //after this
-            EndpointNumber::NoEPavail => {}
-        }
-        old
+impl EpStorage {
+    fn new() -> EpStorage {
+        Self { value: 0 }
     }
-}
-
-impl TryFrom<usize> for EndpointNumber {
-    type Error = ();
-
-    fn try_from(value: usize) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(EndpointNumber::EP0),
-            1 => Ok(EndpointNumber::EP1),
-            2 => Ok(EndpointNumber::EP2),
-            3 => Ok(EndpointNumber::EP3),
-            _ => Err(()),
+    fn advance(&mut self, dir: UsbDirection) -> usb_device::Result<usize> {
+        let offset = match dir {
+            UsbDirection::In => 0,
+            UsbDirection::Out => 4,
+        };
+        for i in 1..3 {
+            if self.value & (1 << (i + offset)) != 0 {
+                self.value |= 1 << i;
+                return Ok(i);
+            }
         }
+        Err(UsbError::EndpointOverflow)
+    }
+    fn allocate(&mut self, index: usize, dir: UsbDirection) -> usb_device::Result<usize> {
+        let pos = match dir {
+            UsbDirection::In => 0,
+            UsbDirection::Out => 4,
+        } + index;
+        if pos > 7 {
+            Err(UsbError::EndpointOverflow)
+        } else {
+            self.value |= 1 << pos;
+            Ok(index)
+        }
+    }
+    fn is_allocated(&mut self, index: usize, dir: UsbDirection) -> bool {
+        let pos = match dir {
+            UsbDirection::In => 0,
+            UsbDirection::Out => 4,
+        } + index;
+        self.value & (1 << pos) != 0
+    }
+    fn set_cntl_max_tlen(&mut self, max: u8) {
+        self.value |= (max as u32) << 8;
+    }
+    fn get_cntl_max_tlen(&self) -> u8 {
+        ((self.value >> 8) & 0xFF) as u8
     }
 }
 
 pub struct UsbBus {
     peripheral: UsbPeripheral,
-    ep_in: EndpointNumber,
-    ep_out: EndpointNumber,
+    endpoints: EpStorage,
 }
 
 impl UsbBus {
     pub fn new(peripheral: UsbPeripheral) -> UsbBusAllocator<UsbBus> {
         let bus = UsbBus {
             peripheral,
-            ep_in: EndpointNumber::EP1,
-            ep_out: EndpointNumber::EP1,
+            endpoints: EpStorage::new(),
         };
 
         let rcu_regs = unsafe { &*pac::RCU::ptr() };
@@ -79,18 +86,18 @@ impl UsbBus {
 macro_rules! rep_register {
     ($index:expr,$var:expr,$reg0:ident,$reg1:ident,$reg2:ident,$reg3:ident,$func:expr) => {
         match $index {
-            EndpointNumber::EP0 => $var.$reg0.modify($func),
-            EndpointNumber::EP1 => $var.$reg1.modify($func),
-            EndpointNumber::EP2 => $var.$reg2.modify($func),
-            EndpointNumber::EP3 => $var.$reg3.modify($func),
-            EndpointNumber::NoEPavail => {}
+            0 => $var.$reg0.modify($func),
+            1 => $var.$reg1.modify($func),
+            2 => $var.$reg2.modify($func),
+            3 => $var.$reg3.modify($func),
+            _ => {}
         }
     };
     ($index:expr,$var:expr,$reg1:ident,$reg2:ident,$reg3:ident,$func:expr) => {
         match $index {
-            EndpointNumber::EP1 => $var.$reg1.modify($func),
-            EndpointNumber::EP2 => $var.$reg2.modify($func),
-            EndpointNumber::EP3 => $var.$reg3.modify($func),
+            1 => $var.$reg1.modify($func),
+            2 => $var.$reg2.modify($func),
+            3 => $var.$reg3.modify($func),
             _ => {}
         }
     };
@@ -196,59 +203,57 @@ impl usb_device::bus::UsbBus for UsbBus {
     fn resume(&self) {}
     fn set_stalled(&self, ep_addr: EndpointAddress, stalled: bool) {
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
-        if let Ok(index) = EndpointNumber::try_from(ep_addr.index()) {
-            rep_register!(
-                index,
-                usbfs_device,
-                doep0ctl,
-                doep1ctl,
-                doep2ctl,
-                doep3ctl,
-                |_, w| {
-                    if stalled {
-                        w.stall().set_bit()
-                    } else {
-                        w.stall().clear_bit()
-                    }
+        let index = ep_addr.index();
+
+        rep_register!(
+            index,
+            usbfs_device,
+            doep0ctl,
+            doep1ctl,
+            doep2ctl,
+            doep3ctl,
+            |_, w| {
+                if stalled {
+                    w.stall().set_bit()
+                } else {
+                    w.stall().clear_bit()
                 }
-            );
-            if index == EndpointNumber::EP0 {
-                usbfs_device
-                    .doep0len
-                    .modify(|_, w| unsafe { w.pcnt().set_bit().stpcnt().bits(1) });
             }
-            rep_register!(
-                index,
-                usbfs_device,
-                doep1len,
-                doep2len,
-                doep3len,
-                |_, w| unsafe { w.pcnt().bits(1).stpcnt_rxdpid().bits(1) }
-            );
-            rep_register!(
-                index,
-                usbfs_device,
-                doep0ctl,
-                doep1ctl,
-                doep2ctl,
-                doep3ctl,
-                |_, w| w.cnak().set_bit()
-            );
+        );
+        if index == 0 {
+            usbfs_device
+                .doep0len
+                .modify(|_, w| unsafe { w.pcnt().set_bit().stpcnt().bits(1) });
         }
+        rep_register!(
+            index,
+            usbfs_device,
+            doep1len,
+            doep2len,
+            doep3len,
+            |_, w| unsafe { w.pcnt().bits(1).stpcnt_rxdpid().bits(1) }
+        );
+        rep_register!(
+            index,
+            usbfs_device,
+            doep0ctl,
+            doep1ctl,
+            doep2ctl,
+            doep3ctl,
+            |_, w| w.cnak().set_bit()
+        );
     }
 
     fn is_stalled(&self, ep_addr: EndpointAddress) -> bool {
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
-        if let Ok(index) = EndpointNumber::try_from(ep_addr.index()) {
-            return match index {
-                EndpointNumber::EP0 => usbfs_device.doep0ctl.read().stall().bit_is_set(),
-                EndpointNumber::EP1 => usbfs_device.doep1ctl.read().stall().bit_is_set(),
-                EndpointNumber::EP2 => usbfs_device.doep2ctl.read().stall().bit_is_set(),
-                EndpointNumber::EP3 => usbfs_device.doep3ctl.read().stall().bit_is_set(),
-                EndpointNumber::NoEPavail => false,
-            };
+        let index = ep_addr.index();
+        match index {
+            0 => usbfs_device.doep0ctl.read().stall().bit_is_set(),
+            1 => usbfs_device.doep1ctl.read().stall().bit_is_set(),
+            2 => usbfs_device.doep2ctl.read().stall().bit_is_set(),
+            3 => usbfs_device.doep3ctl.read().stall().bit_is_set(),
+            _ => false,
         }
-        false
     }
 
     fn set_device_address(&self, addr: u8) {
@@ -278,8 +283,8 @@ impl usb_device::bus::UsbBus for UsbBus {
             buf[i * 4..i * 4 + data.len()].copy_from_slice(&data);
         }
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
-        let index = EndpointNumber::try_from(ep_addr.index()).unwrap_or(EndpointNumber::NoEPavail);
-        if index == EndpointNumber::EP0 {
+        let index = ep_addr.index();
+        if index == 0 {
             usbfs_device
                 .doep0len
                 .modify(|_, w| unsafe { w.pcnt().set_bit().stpcnt().bits(3).tlen().bits(32) });
@@ -311,8 +316,8 @@ impl usb_device::bus::UsbBus for UsbBus {
         }
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
         //setup pcnt  and tlen for transmission
-        let index = EndpointNumber::try_from(ep_addr.index()).unwrap();
-        if index == EndpointNumber::EP0 {
+        let index = ep_addr.index();
+        if index == 0 {
             usbfs_device
                 .diep0len
                 .modify(|_, w| unsafe { w.pcnt().bits(1).tlen().bits(buf.len() as u8) });
@@ -436,27 +441,20 @@ impl usb_device::bus::UsbBus for UsbBus {
         let device = unsafe { &*pac::USBFS_DEVICE::ptr() };
         let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
 
-        //This is somewhat ugly. should be improved later
-        let index: EndpointNumber;
-        if let Some(addr) = ep_addr {
-            if let Ok(ep_nr) = EndpointNumber::try_from(addr.index()) {
-                index = ep_nr;
+        let index = if let Some(addr) = ep_addr {
+            if self.endpoints.is_allocated(addr.index(), ep_dir) {
+                Err(UsbError::InvalidEndpoint)
             } else {
-                return Err(UsbError::InvalidEndpoint);
+                self.endpoints.allocate(addr.index(), ep_dir)
             }
         } else {
-            index = match ep_dir {
-                UsbDirection::Out => self.ep_out.advance(),
-                UsbDirection::In => self.ep_in.advance(),
-            };
-        }
-        if index == EndpointNumber::NoEPavail {
-            return Err(UsbError::EndpointOverflow);
-        }
+            self.endpoints.advance(ep_dir)
+        }?;
+
         match ep_dir {
             UsbDirection::In => {
                 let words = (max_packet_size + 31) / 32;
-                if index == EndpointNumber::EP0 {
+                if index == 0 {
                     if ep_type != EndpointType::Control {
                         return Err(UsbError::Unsupported);
                     }
@@ -514,7 +512,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                 Ok(EndpointAddress::from_parts(index as usize, ep_dir))
             }
             UsbDirection::Out => {
-                if index == EndpointNumber::EP0 {
+                if index == 0 {
                     device.doep0len.modify(|_, w| unsafe {
                         w.tlen()
                             .bits(max_packet_size as u8)
