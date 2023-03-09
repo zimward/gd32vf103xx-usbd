@@ -1,6 +1,6 @@
-use core::{ptr, usize};
+use core::ptr;
 
-use crate::UsbPeripheral;
+use crate::{sprintln, UsbPeripheral};
 use gd32vf103_pac as pac;
 use riscv::interrupt;
 use usb_device::{
@@ -81,26 +81,16 @@ impl UsbBus {
             let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
             usbfs_global.gahbcs.modify(|_, w| w.txfth().set_bit());
             //set device mode disable OTG
-            usbfs_global.gusbcs.modify(|_, w| {
-                w.fdm()
-                    .set_bit()
-                    .fhm()
-                    .clear_bit()
-                    .hnpcen()
-                    .clear_bit()
-                    .srpcen()
-                    .clear_bit()
-            });
-            // power on phy
-            usbfs_global.gccfg.modify(|_, w| {
-                w.sofoen()
-                    .set_bit() // enable SOF output pin
-                    .pwron()
-                    .set_bit() // USB PHY power on
-            });
+            usbfs_global
+                .gusbcs
+                .modify(|_, w| w.fdm().set_bit().hnpcen().clear_bit().srpcen().clear_bit());
             if ignore_vbus {
                 usbfs_global.gccfg.modify(|_, w| w.vbusig().set_bit());
             }
+            // power on phy
+            usbfs_global.gccfg.modify(|_, w| {
+                w.pwron().set_bit() // USB PHY power on
+            });
         });
         UsbBusAllocator::new(bus)
     }
@@ -145,8 +135,8 @@ impl usb_device::bus::UsbBus for UsbBus {
                     .set_bit()
                     //.spie()
                     //.set_bit()
-                    .espie()
-                    .set_bit()
+                    //.espie()
+                    //.set_bit()
                     .rxfneie()
                     .set_bit()
                     .rstie()
@@ -179,15 +169,12 @@ impl usb_device::bus::UsbBus for UsbBus {
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
 
         interrupt::free(|_| {
-            usbfs_global.ginten.modify(|_, w| w.spie().set_bit());
             //enable OUT endpoints to receive data from host
             usbfs_device.doep0len.modify(|_, w| unsafe {
                 w.tlen()
                     .bits(self.endpoints.get_cntl_max_tlen())
                     .pcnt()
                     .set_bit()
-                    .stpcnt()
-                    .bits(0)
             });
             usbfs_device
                 .doep0ctl
@@ -242,8 +229,6 @@ impl usb_device::bus::UsbBus for UsbBus {
                     usbfs_device.doep0len.modify(|_, w| unsafe {
                         w.pcnt()
                             .set_bit()
-                            .stpcnt()
-                            .bits(0)
                             .tlen()
                             .bits(self.endpoints.get_cntl_max_tlen())
                     });
@@ -317,8 +302,6 @@ impl usb_device::bus::UsbBus for UsbBus {
                 usbfs_device.doep0len.modify(|_, w| unsafe {
                     w.pcnt()
                         .set_bit()
-                        .stpcnt()
-                        .bits(0)
                         .tlen()
                         .bits(self.endpoints.get_cntl_max_tlen())
                 });
@@ -341,8 +324,8 @@ impl usb_device::bus::UsbBus for UsbBus {
                 doep3ctl,
                 |_, w| { w.epen().set_bit().cnak().set_bit() }
             );
-        });
-        Ok(count)
+            Ok(count)
+        })
     }
 
     fn write(&self, ep_addr: EndpointAddress, buf: &[u8]) -> usb_device::Result<usize> {
@@ -353,10 +336,15 @@ impl usb_device::bus::UsbBus for UsbBus {
         //setup pcnt  and tlen for transmission
         interrupt::free(|_| {
             let index = ep_addr.index();
+            let max: usize = if buf.len() < self.endpoints.get_cntl_max_tlen() as usize {
+                buf.len()
+            } else {
+                self.endpoints.get_cntl_max_tlen() as usize
+            };
             if index == 0 {
                 usbfs_device
                     .diep0len
-                    .modify(|_, w| unsafe { w.pcnt().bits(1).tlen().bits(buf.len() as u8) });
+                    .modify(|_, w| unsafe { w.pcnt().bits(1).tlen().bits(max as u8) });
                 //clear nak and enable EP
                 usbfs_device
                     .diep0ctl
@@ -384,8 +372,8 @@ impl usb_device::bus::UsbBus for UsbBus {
                     ptr::write_volatile(fifo, w);
                 }
             }
-        });
-        Ok(buf.len())
+            Ok(max)
+        })
     }
 
     fn poll(&self) -> PollResult {
@@ -446,9 +434,6 @@ impl usb_device::bus::UsbBus for UsbBus {
                     ep_setup |= 1 << ep;
                 } else if pty == 0b0010 {
                     ep_out |= 1 << ep;
-                } else {
-                    //Pop transfer finished message
-                    //let _ = usbfs_global.grstatp_device().read();
                 }
             }
             if ep_in != 0 || ep_out != 0 || ep_setup != 0 {
@@ -457,12 +442,14 @@ impl usb_device::bus::UsbBus for UsbBus {
                     ep_in_complete: ep_in,
                     ep_setup,
                 }
-            } else if gintf.sp().bit_is_set() {
-                usbfs_global.gintf.modify(|_, w| w.sp().set_bit());
-                PollResult::Suspend
             } else if gintf.rst().bit_is_set() {
                 usbfs_global.gintf.modify(|_, w| w.rst().set_bit());
+                while usbfs_global.gintf.read().enumf().bit_is_clear() {}
                 PollResult::Reset
+            } else if gintf.sp().bit_is_set() {
+                usbfs_global.gintf.modify(|_, w| w.sp().set_bit());
+                //PollResult::Suspend
+                PollResult::None
             } else if gintf.wkupif().bit_is_set() {
                 usbfs_global.gintf.modify(|_, w| w.wkupif().clear_bit());
                 PollResult::Resume
@@ -493,7 +480,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             self.endpoints.advance(ep_dir)
         }?;
 
-        let words = (max_packet_size + 31) / 32;
+        let words = (max_packet_size + 3) / 4;
         interrupt::free(|_| {
             match ep_dir {
                 UsbDirection::In => {
