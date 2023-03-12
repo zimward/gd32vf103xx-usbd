@@ -25,7 +25,7 @@ impl EpStorage {
         };
         for i in 1..3 {
             if self.value & (1 << (i + offset)) == 0 {
-                self.value |= 1 << i;
+                self.value |= 1 << (i + offset);
                 return Ok(i);
             }
         }
@@ -79,6 +79,7 @@ impl UsbBus {
             rcu_regs.ahbrst.modify(|_, w| w.usbfsrst().clear_bit());
 
             let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
+            let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
             usbfs_global.gahbcs.modify(|_, w| w.txfth().set_bit());
             //set device mode disable OTG
             usbfs_global
@@ -87,6 +88,8 @@ impl UsbBus {
             if ignore_vbus {
                 usbfs_global.gccfg.modify(|_, w| w.vbusig().set_bit());
             }
+            //soft disconnect
+            usbfs_device.dctl.modify(|_, w| w.sd().set_bit());
             // power on phy
             usbfs_global.gccfg.modify(|_, w| {
                 w.pwron().set_bit() // USB PHY power on
@@ -133,10 +136,10 @@ impl usb_device::bus::UsbBus for UsbBus {
                     .set_bit()
                     .enumfie()
                     .set_bit()
-                    //.spie()
-                    //.set_bit()
-                    //.espie()
-                    //.set_bit()
+                    .spie()
+                    .set_bit()
+                    .espie()
+                    .set_bit()
                     .rxfneie()
                     .set_bit()
                     .rstie()
@@ -159,10 +162,9 @@ impl usb_device::bus::UsbBus for UsbBus {
             while usbfs_global.grstctl.read().csrst().bit_is_set() {} //wait for soft reset
                                                                       //EP interrupts
             usbfs_device.diepinten.modify(|_, w| w.tfen().set_bit());
+            usbfs_device.dctl.modify(|_, w| w.sd().clear_bit());
         });
     }
-
-    fn suspend(&self) {}
 
     fn reset(&self) {
         let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
@@ -201,10 +203,30 @@ impl usb_device::bus::UsbBus for UsbBus {
     }
 
     fn force_reset(&self) -> usb_device::Result<()> {
+        let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
+        usbfs_device.dctl.modify(|_, w| w.sd().set_bit());
+        usbfs_device.dctl.modify(|_, w| w.sd().clear_bit());
         Ok(())
     }
 
-    fn resume(&self) {}
+    fn suspend(&self) {
+        //Enter low power mode
+        let usbfs_pwr = unsafe { &*pac::USBFS_PWRCLK::ptr() };
+        interrupt::free(|_| {
+            //stop usb clock generation
+            usbfs_pwr
+                .pwrclkctl
+                .modify(|_, w| w.suclk().set_bit().shclk().set_bit());
+        });
+        //maybe enter deepsleep mode?
+    }
+
+    fn resume(&self) {
+        let usbfs_pwr = unsafe { &*pac::USBFS_PWRCLK::ptr() };
+        interrupt::free(|_| {
+            usbfs_pwr.pwrclkctl.reset();
+        });
+    }
     fn set_stalled(&self, ep_addr: EndpointAddress, stalled: bool) {
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
         let index = ep_addr.index();
@@ -437,6 +459,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                 }
             }
             if ep_in != 0 || ep_out != 0 || ep_setup != 0 {
+                //sprintln!("out: {} in: {} setup: {}", ep_out, ep_in, ep_setup);
                 PollResult::Data {
                     ep_out,
                     ep_in_complete: ep_in,
@@ -448,10 +471,12 @@ impl usb_device::bus::UsbBus for UsbBus {
                 PollResult::Reset
             } else if gintf.sp().bit_is_set() {
                 usbfs_global.gintf.modify(|_, w| w.sp().set_bit());
-                //PollResult::Suspend
-                PollResult::None
+                PollResult::Suspend
+            } else if gintf.esp().bit_is_set() {
+                usbfs_global.gintf.modify(|_, w| w.esp().set_bit());
+                PollResult::Suspend
             } else if gintf.wkupif().bit_is_set() {
-                usbfs_global.gintf.modify(|_, w| w.wkupif().clear_bit());
+                usbfs_global.gintf.modify(|_, w| w.wkupif().set_bit());
                 PollResult::Resume
             } else {
                 PollResult::None
