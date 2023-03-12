@@ -304,11 +304,11 @@ impl usb_device::bus::UsbBus for UsbBus {
             return Err(UsbError::InvalidEndpoint);
         }
         let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
-        let status = usbfs_global.grstatp_device().read();
-        if status.epnum().bits() as usize != ep_addr.index() {
+        if usbfs_global.grstatr_device().read().epnum().bits() as usize != ep_addr.index() {
             return Err(UsbError::WouldBlock);
         }
-        let count: usize = status.bcount().bits().into();
+        //pop status entry from fifo
+        let count: usize = usbfs_global.grstatp_device().read().bcount().bits().into();
         if count > buf.len() {
             return Err(UsbError::EndpointMemoryOverflow);
         }
@@ -456,10 +456,12 @@ impl usb_device::bus::UsbBus for UsbBus {
                     ep_setup |= 1 << ep;
                 } else if pty == 0b0010 {
                     ep_out |= 1 << ep;
+                } else {
+                    //pop TF finished entry from fifo
+                    let _ = usbfs_global.grstatp_device().read();
                 }
             }
             if ep_in != 0 || ep_out != 0 || ep_setup != 0 {
-                //sprintln!("out: {} in: {} setup: {}", ep_out, ep_in, ep_setup);
                 PollResult::Data {
                     ep_out,
                     ep_in_complete: ep_in,
