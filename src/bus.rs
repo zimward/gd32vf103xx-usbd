@@ -365,15 +365,10 @@ impl usb_device::bus::UsbBus for UsbBus {
         //setup pcnt  and tlen for transmission
         interrupt::free(|_| {
             let index = ep_addr.index();
-            let max: usize = if buf.len() < self.endpoints.get_cntl_max_tlen() as usize {
-                buf.len()
-            } else {
-                self.endpoints.get_cntl_max_tlen() as usize
-            };
             if index == 0 {
                 usbfs_device
                     .diep0len
-                    .modify(|_, w| unsafe { w.pcnt().bits(1).tlen().bits(max as u8) });
+                    .modify(|_, w| unsafe { w.pcnt().bits(1).tlen().bits(buf.len() as u8) });
                 //clear nak and enable EP
                 usbfs_device
                     .diep0ctl
@@ -401,7 +396,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                     ptr::write_volatile(fifo, w);
                 }
             }
-            Ok(max)
+            Ok(buf.len())
         })
     }
 
