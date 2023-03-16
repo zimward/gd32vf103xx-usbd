@@ -176,19 +176,14 @@ impl usb_device::bus::UsbBus for UsbBus {
                 .grstctl
                 .modify(|_, w| unsafe { w.txfnum().bits(0x10).txff().set_bit() });
             while usbfs_global.grstctl.read().txff().bit_is_set() {}
-            //reset address
-            usbfs_device.dcfg.modify(|_, w| unsafe { w.dar().bits(0) });
-
             //enable OUT endpoints to receive data from host
-            usbfs_device.doep0len.modify(|_, w| unsafe {
-                w.tlen()
-                    .bits(self.endpoints.get_cntl_max_tlen())
-                    .pcnt()
-                    .set_bit()
-            });
+            //EP0 will need to receive a setup packet first
+            usbfs_device
+                .doep0len
+                .modify(|_, w| unsafe { w.tlen().bits(0).pcnt().clear_bit().stpcnt().bits(3) });
             usbfs_device
                 .doep0ctl
-                .modify(|_, w| w.epen().set_bit().cnak().set_bit().stall().set_bit());
+                .modify(|_, w| w.epen().set_bit().stall().set_bit());
             let max_rx_bytes = usbfs_global.grflen.read().rxfd().bits() as u32 * 4;
             for i in 1..3 {
                 if self.endpoints.is_allocated(i, UsbDirection::Out) {
@@ -261,6 +256,8 @@ impl usb_device::bus::UsbBus for UsbBus {
                             .set_bit()
                             .tlen()
                             .bits(self.endpoints.get_cntl_max_tlen())
+                            .stpcnt()
+                            .bits(3)
                     });
                 }
                 let usbfs_global = unsafe { &*pac::USBFS_GLOBAL::ptr() };
@@ -334,6 +331,8 @@ impl usb_device::bus::UsbBus for UsbBus {
                         .set_bit()
                         .tlen()
                         .bits(self.endpoints.get_cntl_max_tlen())
+                        .stpcnt()
+                        .bits(3)
                 });
             }
             rep_register!(
@@ -352,7 +351,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                 doep1ctl,
                 doep2ctl,
                 doep3ctl,
-                |_, w| { w.epen().set_bit().cnak().set_bit().stall().set_bit() }
+                |_, w| { w.epen().set_bit().cnak().set_bit() }
             );
             Ok(count)
         })
