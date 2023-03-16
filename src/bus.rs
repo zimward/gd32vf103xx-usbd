@@ -171,6 +171,14 @@ impl usb_device::bus::UsbBus for UsbBus {
         let usbfs_device = unsafe { &*pac::USBFS_DEVICE::ptr() };
 
         interrupt::free(|_| {
+            //flush all tx fifo's
+            usbfs_global
+                .grstctl
+                .modify(|_, w| unsafe { w.txfnum().bits(0x10).txff().set_bit() });
+            while usbfs_global.grstctl.read().txff().bit_is_set() {}
+            //reset address
+            usbfs_device.dcfg.modify(|_, w| unsafe { w.dar().bits(0) });
+
             //enable OUT endpoints to receive data from host
             usbfs_device.doep0len.modify(|_, w| unsafe {
                 w.tlen()
@@ -180,7 +188,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             });
             usbfs_device
                 .doep0ctl
-                .modify(|_, w| w.epen().set_bit().cnak().set_bit());
+                .modify(|_, w| w.epen().set_bit().cnak().set_bit().stall().set_bit());
             let max_rx_bytes = usbfs_global.grflen.read().rxfd().bits() as u32 * 4;
             for i in 1..3 {
                 if self.endpoints.is_allocated(i, UsbDirection::Out) {
@@ -344,7 +352,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                 doep1ctl,
                 doep2ctl,
                 doep3ctl,
-                |_, w| { w.epen().set_bit().cnak().set_bit() }
+                |_, w| { w.epen().set_bit().cnak().set_bit().stall().set_bit() }
             );
             Ok(count)
         })
@@ -456,8 +464,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                     ep_setup |= 1 << ep;
                 } else if pty == 0b0010 {
                     ep_out |= 1 << ep;
-                } else {
-                    //pop TF finished entry from fifo
+                } else if pty == 0 || pty == 0b0100 || pty == 0b0011 {
                     let _ = usbfs_global.grstatp_device().read();
                 }
             }
