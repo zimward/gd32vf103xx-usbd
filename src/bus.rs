@@ -416,9 +416,6 @@ impl usb_device::bus::UsbBus for UsbBus {
                     w <<= 8;
                     w |= *c as u32;
                 }
-                if chunk.len() != 4 {
-                    w <<= 4 - chunk.len();
-                }
                 unsafe {
                     ptr::write_volatile(fifo, w);
                 }
