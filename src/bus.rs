@@ -2,7 +2,6 @@ use core::ptr;
 
 use crate::{sprintln, UsbPeripheral};
 use gd32vf103_pac as pac;
-use pac::usbfs_device;
 use riscv::interrupt;
 use usb_device::{
     bus::PollResult,
@@ -62,7 +61,6 @@ impl EpStorage {
 pub struct UsbBus {
     peripheral: UsbPeripheral,
     endpoints: EpStorage,
-    tx_addr_end: usize,
 }
 
 impl UsbBus {
@@ -70,7 +68,6 @@ impl UsbBus {
         let bus = UsbBus {
             peripheral,
             endpoints: EpStorage::new(),
-            tx_addr_end: 0,
         };
 
         let rcu_regs = unsafe { &*pac::RCU::ptr() };
@@ -164,6 +161,25 @@ impl usb_device::bus::UsbBus for UsbBus {
             usbfs_global.grstctl.modify(|_, w| w.csrst().set_bit()); //soft reset
             while usbfs_global.grstctl.read().csrst().bit_is_set() {} //wait for soft reset
 
+            //set fifo ram address offsets
+            {
+                let mut depth = usbfs_global.grflen.read().rxfd().bits();
+                usbfs_global
+                    .diep0tflen()
+                    .modify(|_, w| unsafe { w.iep0txrsar().bits(depth) });
+                depth += usbfs_global.diep0tflen().read().iep0txfd().bits();
+                usbfs_global
+                    .diep1tflen
+                    .modify(|_, w| unsafe { w.ieptxrsar().bits(depth) });
+                depth += usbfs_global.diep1tflen.read().ieptxfd().bits();
+                usbfs_global
+                    .diep2tflen
+                    .modify(|_, w| unsafe { w.ieptxrsar().bits(depth) });
+                depth += usbfs_global.diep2tflen.read().ieptxfd().bits();
+                usbfs_global
+                    .diep3tflen
+                    .modify(|_, w| unsafe { w.ieptxrsar().bits(depth) });
+            }
             //flush all tx fifo's
             usbfs_global
                 .grstctl
@@ -565,16 +581,8 @@ impl usb_device::bus::UsbBus for UsbBus {
                         diep1tflen,
                         diep2tflen,
                         diep3tflen,
-                        |_, w| {
-                            unsafe {
-                                w.ieptxfd()
-                                    .bits(words)
-                                    .ieptxrsar()
-                                    .bits(self.tx_addr_end as u16)
-                            }
-                        }
+                        |_, w| { unsafe { w.ieptxfd().bits(words) } }
                     );
-                    self.tx_addr_end += words as usize;
                     Ok(EndpointAddress::from_parts(index, ep_dir))
                 }
                 UsbDirection::Out => {
