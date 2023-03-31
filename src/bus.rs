@@ -2,6 +2,7 @@ use core::ptr;
 
 use crate::{sprintln, UsbPeripheral};
 use gd32vf103_pac as pac;
+use pac::usbfs_device;
 use riscv::interrupt;
 use usb_device::{
     bus::PollResult,
@@ -61,6 +62,7 @@ impl EpStorage {
 pub struct UsbBus {
     peripheral: UsbPeripheral,
     endpoints: EpStorage,
+    tx_addr_end: usize,
 }
 
 impl UsbBus {
@@ -68,6 +70,7 @@ impl UsbBus {
         let bus = UsbBus {
             peripheral,
             endpoints: EpStorage::new(),
+            tx_addr_end: 0,
         };
 
         let rcu_regs = unsafe { &*pac::RCU::ptr() };
@@ -160,7 +163,15 @@ impl usb_device::bus::UsbBus for UsbBus {
             });
             usbfs_global.grstctl.modify(|_, w| w.csrst().set_bit()); //soft reset
             while usbfs_global.grstctl.read().csrst().bit_is_set() {} //wait for soft reset
-                                                                      //EP interrupts
+
+            //flush all tx fifo's
+            usbfs_global
+                .grstctl
+                .modify(|_, w| unsafe { w.txfnum().bits(0x10).txff().set_bit() });
+            while usbfs_global.grstctl.read().txff().bit_is_set() {}
+            usbfs_global.grstctl.modify(|_, w| w.rxff().set_bit());
+            while usbfs_global.grstctl.read().rxff().bit_is_set() {}
+            //EP interrupts
             usbfs_device.diepinten.modify(|_, w| w.tfen().set_bit());
             usbfs_device.dctl.modify(|_, w| w.sd().clear_bit());
         });
@@ -554,8 +565,16 @@ impl usb_device::bus::UsbBus for UsbBus {
                         diep1tflen,
                         diep2tflen,
                         diep3tflen,
-                        |_, w| { unsafe { w.ieptxfd().bits(words) } }
+                        |_, w| {
+                            unsafe {
+                                w.ieptxfd()
+                                    .bits(words)
+                                    .ieptxrsar()
+                                    .bits(self.tx_addr_end as u16)
+                            }
+                        }
                     );
+                    self.tx_addr_end += words as usize;
                     Ok(EndpointAddress::from_parts(index, ep_dir))
                 }
                 UsbDirection::Out => {
