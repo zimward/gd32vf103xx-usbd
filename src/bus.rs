@@ -203,6 +203,9 @@ impl usb_device::bus::UsbBus for UsbBus {
                 .grstctl
                 .modify(|_, w| unsafe { w.txfnum().bits(0x10).txff().set_bit() });
             while usbfs_global.grstctl.read().txff().bit_is_set() {}
+            //flush rx fifo
+            usbfs_global.grstctl.modify(|_, w| w.rxff().set_bit());
+            while usbfs_global.grstctl.read().rxff().bit_is_set() {}
             //enable OUT endpoints to receive data from host
             //EP0 will need to receive a setup packet first
             usbfs_device
