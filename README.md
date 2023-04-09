@@ -1,2 +1,2 @@
 # State
-Enumeration is working, but the last character of a string get scrambled and enumeration is too slow.
+Enumeration is working, but it takes far too long to respond to a request making it nearly timeout.
